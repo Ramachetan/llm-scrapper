@@ -1,0 +1,1 @@
+Go to LinkedIn.com and login with x_name and x_password. Find and open the profile with the URL: https://www.linkedin.com/in/rama-chetan/. Review the profile and extract the following details: Name, Job Title, Company, Location, About, Experience, Education, Skills, Recommendations, and Connections. Return the extracted details in JSON format.
