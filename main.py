@@ -1,22 +1,26 @@
-from langchain_google_genai import ChatGoogleGenerativeAI
-from browser_use import Agent
+import streamlit as st
 import asyncio
 import os
+import sys
 import json
+import re
 from dotenv import load_dotenv
+from langchain_google_genai import ChatGoogleGenerativeAI
+from browser_use import Agent
 
 load_dotenv()
 
-async def main():
+if sys.platform.startswith('win'):
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+async def run_agent(user_task):
     sensitive_data = {
-        'x_name': os.getenv("LINKEDIN_USERNAME"), 
+        'x_name': os.getenv("LINKEDIN_USERNAME"),
         'x_password': os.getenv("LINKEDIN_PASSWORD")
     }
 
-    print("Sensitive Data (Hidden for security):", {k: "******" for k in sensitive_data.keys()})
-    
     agent = Agent(
-        task="Go to Google, search for 'langchain', click the first result, and return findings in JSON.",
+        task=user_task,
         llm=ChatGoogleGenerativeAI(
             model=os.getenv("MODEL_NAME"),
             temperature=0,
@@ -31,50 +35,109 @@ async def main():
 
     history = await agent.run()
 
-    # Printing everything from history
-    print("\n===== AGENT EXECUTION HISTORY =====\n")
+    output = {
+        "Total Steps": history.number_of_steps(),
+        "Total Duration (Seconds)": history.total_duration_seconds(),
+        "Total Input Tokens Used": history.total_input_tokens(),
+    }
 
-    print("🔹 Total Steps:", history.number_of_steps())
-    print("🔹 Total Duration (Seconds):", history.total_duration_seconds())
-    print("🔹 Total Input Tokens Used:", history.total_input_tokens())
-
-    print("\n===== ACTIONS TAKEN BY AGENT =====")
+    actions = []
     for step, action in enumerate(history.model_actions(), 1):
-        # Convert non-serializable objects to string representations
         action_serializable = {
-            key: (str(value) if isinstance(value, object) and not isinstance(value, (dict, list, str, int, float, bool, type(None))) else value)
+            key: (str(value) if not isinstance(value, (dict, list, str, int, float, bool, type(None))) else value)
             for key, value in action.items()
         }
-        print(f"\nStep {step}:")
-        print(json.dumps(action_serializable, indent=2))
+        actions.append({f"Step {step}": action_serializable})
+    output["Actions Taken"] = actions
 
-    print("\n===== RESULTS OF ACTIONS =====")
+    results = []
     for step, result in enumerate(history.action_results(), 1):
-        print(f"\nStep {step}:")
-        print(json.dumps(result.model_dump(exclude_none=True), indent=2))
+        results.append({f"Step {step}": result.model_dump(exclude_none=True)})
+    output["Action Results"] = results
 
-    print("\n===== EXTRACTED CONTENT =====")
     extracted_content = history.extracted_content()
-    if extracted_content:
-        for step, content in enumerate(extracted_content, 1):
-            print(f"\nStep {step} Content:\n{content}")
-    else:
-        print("No extracted content found.")
+    output["Extracted Content"] = extracted_content if extracted_content else "No extracted content found."
 
-    print("\n===== ERRORS (IF ANY) =====")
     errors = history.errors()
-    if any(errors):
-        for step, error in enumerate(errors, 1):
-            if error:
-                print(f"\nStep {step} Error:\n{error}")
-    else:
-        print("No errors encountered.")
+    output["Errors"] = errors if any(errors) else "No errors encountered."
 
-    print("\n===== FINAL RESULT =====")
     final_result = history.final_result()
-    print(final_result if final_result else "No final result available.")
+    output["Final Result"] = final_result if final_result else "No final result available."
+    output["Success Status"] = "✔️ Task Completed Successfully" if history.is_successful() else "❌ Task Failed or Incomplete."
 
-    print("\n===== SUCCESS STATUS =====")
-    print("✔️ Task Completed Successfully?" if history.is_successful() else "❌ Task Failed or Incomplete.")
+    return output
 
-asyncio.run(main())
+def main():
+    st.title("LLM Scraper Agent")
+    st.write("Enter a task for the agent to execute.")
+
+    # Task input
+    user_task = st.text_area(
+        "Enter Task",
+        "Go to Google, search for 'browser-use', click the first result, and return findings in JSON."
+    )
+
+    if st.button("Run Agent"):
+        if not user_task.strip():
+            st.error("Please enter a valid task.")
+        else:
+            st.info("Running agent, please wait...")
+            result = asyncio.run(run_agent(user_task))
+            st.success("Agent execution completed!")
+
+            # Display Summary
+            st.header("Summary")
+            st.markdown(f"**Total Steps:** {result.get('Total Steps', 'N/A')}")
+            st.markdown(f"**Total Duration (Seconds):** {result.get('Total Duration (Seconds)', 'N/A')}")
+            st.markdown(f"**Total Input Tokens Used:** {result.get('Total Input Tokens Used', 'N/A')}")
+            st.markdown(f"**Success Status:** {result.get('Success Status', 'N/A')}")
+
+            # Display Actions Taken
+            st.subheader("Actions Taken")
+            for action in result.get("Actions Taken", []):
+                st.json(action)
+
+            # Display Action Results
+            st.subheader("Action Results")
+            for action_result in result.get("Action Results", []):
+                st.json(action_result)
+
+            # Process and display Extracted Content
+            st.subheader("Extracted Content")
+            extracted_content = result.get("Extracted Content", "")
+
+            # If extracted_content is a list, join its elements into a single string
+            if isinstance(extracted_content, list):
+                extracted_content = "\n".join(extracted_content)
+
+            # Regex to extract JSON blocks (delimited by ```json and ```)
+            pattern = r"```json\s*(.*?)```"
+            json_blocks = re.findall(pattern, extracted_content, re.DOTALL)
+
+            if json_blocks:
+                for idx, json_block in enumerate(json_blocks, 1):
+                    st.markdown(f"**Extracted JSON Block {idx}:**")
+                    try:
+                        json_data = json.loads(json_block)
+                        st.json(json_data)
+                    except Exception as e:
+                        st.warning("Failed to parse JSON block. Displaying raw content:")
+                        st.code(json_block, language="json")
+                # Remove JSON blocks from the extracted content for the remaining text
+                cleaned_content = re.sub(pattern, '', extracted_content, flags=re.DOTALL).strip()
+                if cleaned_content:
+                    st.markdown("**Other Extracted Content:**")
+                    st.write(cleaned_content)
+            else:
+                st.write(extracted_content)
+
+
+            # Display Errors and Final Result
+            st.subheader("Errors")
+            st.write(result.get("Errors", "No errors encountered."))
+
+            st.subheader("Final Result")
+            st.write(result.get("Final Result", "No final result available."))
+
+if __name__ == "__main__":
+    main()
